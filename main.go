@@ -5,6 +5,7 @@ import (
 	"github.com/pkg/sftp"
 	"github.com/secsy/goftp"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -25,54 +26,60 @@ const projectDir = "F:\\Downloads\\OpenServer\\domains\\booking_local"
 //const projectDir = "C:\\Users\\user\\Documents\\projects\\test_go\\indexes"
 
 //const projectDirFtp = "/FreeAgent_Drive/projects/booking/"
-const projectDirFtp = "'FreeAgent Drive/projects/indexes'"
+const projectDirFtp = "/FreeAgent Drive/projects/indexes"
 
 var projectDirs = [...]string{
 	//"F:\\Downloads\\OpenServer\\domains\\booking_local",
 	//"F:\\Downloads\\OpenServer\\domains\\symf5api",
-	"C:\\Users\\user\\Documents\\projects\\test_go\\indexes",
+	//"C:\\Users\\user\\Documents\\projects\\test_go\\indexes",
+	"/home/owner/Documents/projects/go/cloud-programming/indexes",
 }
 
 func main() {
 	createDir(indexesDir)
 
-	//go exitProgram()
+	go exitProgram()
 
-	client := createSftpClient()
-	if client != nil {
-		defer client.Close()
-
-		//cwd, err := client.ReadDir("/tmp/mnt")
-		//check(err)
-		//if err == nil {
-		//	log.Println(cwd)
-		//}
-
-		cwd, err := client.Getwd()
-		check(err)
-		if err == nil {
-			log.Println(cwd)
-		}
-	}
-
-	//for {
-	//	for indexDir, dirRoot := range projectDirs {
-	//		log.Println(indexDir+1, dirRoot)
+	//client := createSftpClient()
+	//if client != nil {
+	//	defer client.Close()
 	//
-	//		start := time.Now()
-	//
-	//		files, err := getFiles(dirRoot, projectDirFtp)
-	//		//files, err := FilePathWalkDir(dirRoot)
-	//
-	//		check(err)
-	//
-	//		log.Printf("Count files: %d, processing time: %f", len(files), time.Now().Sub(start).Seconds())
-	//		log.Println("Files: ", files)
-	//		//log.Printf("Processing time: %f", time.Now().Sub(start).Seconds())
+	//	rootDir, err := client.Getwd()
+	//	check(err)
+	//	if err == nil {
+	//		log.Println(rootDir)
 	//	}
 	//
-	//	time.Sleep(10 * time.Second)
+	//	cwd, err := client.ReadDir(rootDir)
+	//	for _, val := range cwd {
+	//		log.Println(val.Name())
+	//	}
+	//
+	//	cwd2, err := client.Stat(rootDir + projectDirFtp)
+	//	check(err)
+	//	if err == nil {
+	//		log.Println(cwd2.Name(), cwd2.IsDir())
+	//	}
 	//}
+
+	for {
+		for indexDir, dirRoot := range projectDirs {
+			log.Println(indexDir+1, dirRoot)
+
+			start := time.Now()
+
+			files, err := getFiles(dirRoot, projectDirFtp)
+			//files, err := FilePathWalkDir(dirRoot)
+
+			check(err)
+
+			log.Printf("Count files: %d, processing time: %f", len(files), time.Now().Sub(start).Seconds())
+			log.Println("Files: ", files)
+			//log.Printf("Processing time: %f", time.Now().Sub(start).Seconds())
+		}
+
+		time.Sleep(10 * time.Second)
+	}
 }
 
 func exitProgram() {
@@ -101,7 +108,24 @@ func getFiles(root, rootFtp string) ([]string, error) {
 	c := make(chan string)
 	cQuit := make(chan byte)
 
-	go getFile(root, rootFtp, "/", nil, &c, &cQuit)
+	client := createSftpClient()
+
+	if client == nil {
+		log.Println("FTP client is nil")
+		return nil, nil
+	}
+
+	defer client.Close()
+
+	cwd, err := client.Getwd()
+	if err != nil {
+		log.Println(err)
+		return nil, nil
+	}
+
+	rootFtp = cwd + rootFtp
+
+	go getFile(root, rootFtp, client, "/", nil, &c, &cQuit)
 
 	for {
 		select {
@@ -114,16 +138,8 @@ func getFiles(root, rootFtp string) ([]string, error) {
 
 }
 
-func getFile(root, rootFtp, path string, wg *sync.WaitGroup, c *chan string, cQuit *chan byte) {
+func getFile(root, rootFtp string, ftpClient *sftp.Client, path string, wg *sync.WaitGroup, c *chan string, cQuit *chan byte) {
 	var localWg sync.WaitGroup
-	client := createFtpClient()
-
-	if client == nil {
-		log.Println("FTP client is nil")
-		return
-	}
-
-	defer client.Close()
 
 	if wg != nil {
 		defer wg.Done()
@@ -147,34 +163,48 @@ func getFile(root, rootFtp, path string, wg *sync.WaitGroup, c *chan string, cQu
 	for _, file := range files {
 		if file.IsDir() {
 			localWg.Add(1)
-			go getFile(root, rootFtp, fmt.Sprintf("%s%s/", path, file.Name()), &localWg, c, nil)
+			go getFile(root, rootFtp, ftpClient, fmt.Sprintf("%s%s/", path, file.Name()), &localWg, c, nil)
 		} else {
 			//if time.Now().Sub(file.ModTime()).Seconds() < 20 {
 			//*c <- path + file.Name()
 			//}
 
-			fileInfo, err := client.Stat(rootFtp + path + file.Name())
+			fileInfo, err := ftpClient.Stat(rootFtp + path + file.Name())
+			var dstFile *sftp.File
 
-			if os.IsNotExist(err) || fileInfo != nil {
-				//log.Println(file.Name(), file.ModTime().UTC(), fileInfo.ModTime().UTC(), file.ModTime().UTC().After(fileInfo.ModTime().UTC()))
+			if os.IsNotExist(err) {
+				dstFile, err = ftpClient.Create(rootFtp + path + file.Name())
+				if err != nil {
+					log.Println(err)
+					continue
+				}
+			}
 
-				if file.ModTime().UTC().After(fileInfo.ModTime().UTC()) {
-					//log.Println(root + path + file.Name())
-					storedFile, err := os.Open(root + path + file.Name())
+			if dstFile != nil || fileInfo != nil {
+				if file.ModTime().UTC().After(fileInfo.ModTime().UTC().Add(10 * time.Second)) {
+					srcFile, err := os.Open(root + path + file.Name())
 					check(err)
 
-					if storedFile != nil {
+					if srcFile != nil {
 						*c <- path + file.Name()
-						err = client.Delete(rootFtp + path + file.Name())
+
+						_, err = io.Copy(dstFile, srcFile)
 						check(err)
-						err = client.Store(rootFtp+path+file.Name(), storedFile)
-						check(err)
-						_ = storedFile.Close()
+
+						_ = srcFile.Close()
+
+						//err = client.Delete(rootFtp + path + file.Name())
+						//check(err)
+						//err = client.Store(rootFtp+path+file.Name(), storedFile)
+						//check(err)
+						//_ = storedFile.Close()
 					}
 				}
 			} else {
 				check(err)
 			}
+
+			_ = dstFile.Close()
 		}
 	}
 
